@@ -69,6 +69,8 @@ let scene, camera, renderer;
 let sand, rock;
 let minuteRings = []; // 60 rings, one per minute
 let hourStones = []; // 12 hour markers
+let sandSpirits = []; // Garden keeper spirits
+let fallingLeaves = []; // Ambient falling leaves/petals
 let ambientLight, sunLight, shimmerLight;
 
 // ── Resize ─────────────────────────────────────────────────────────
@@ -125,6 +127,20 @@ function resize() {
             rippleOffset: 0
         });
     }
+    
+    // Initialize sand spirits
+    const spiritCount = state.isMobile ? 12 : 18;
+    while (sandSpirits.length < spiritCount) {
+        sandSpirits.push(createSandSpirit());
+    }
+    sandSpirits.length = spiritCount;
+    
+    // Initialize falling leaves
+    const leafCount = state.isMobile ? 5 : 8;
+    while (fallingLeaves.length < leafCount) {
+        fallingLeaves.push(createFallingLeaf());
+    }
+    fallingLeaves.length = leafCount;
     
     if (renderer) {
         renderer.setSize(state.w, state.h);
@@ -350,6 +366,58 @@ function getTimeData() {
     return { hours, minutes, seconds, secFrac, minuteProgress };
 }
 
+// Create sand spirit (garden keeper)
+function createSandSpirit() {
+    return {
+        x: state.cx + (Math.random() - 0.5) * state.maxClockRadius * 2,
+        y: state.cy + (Math.random() - 0.5) * state.maxClockRadius * 2,
+        targetX: 0,
+        targetY: 0,
+        size: Math.random() * 2 + 2,
+        alpha: Math.random() * 0.3 + 0.2,
+        speed: Math.random() * 0.3 + 0.2,
+        behavior: 'drift', // drift, tend, gather
+        targetRing: null,
+        phase: Math.random() * TWO_PI
+    };
+}
+
+// Create falling leaf/petal
+function createFallingLeaf() {
+    const hour = new Date().getHours();
+    let color, type;
+    
+    // Seasonal colors based on time of day
+    if (hour >= 5 && hour < 10) {
+        // Morning - cherry blossoms
+        color = Math.random() > 0.5 ? '#ffc0cb' : '#ffffff';
+        type = 'petal';
+    } else if (hour >= 10 && hour < 16) {
+        // Afternoon - golden leaves
+        color = ['#d4a574', '#c49a6c', '#b8860b'][Math.floor(Math.random() * 3)];
+        type = 'leaf';
+    } else {
+        // Evening/night - darker leaves with occasional glow
+        color = Math.random() > 0.8 ? '#e8dcc8' : '#8b7d6b';
+        type = 'leaf';
+    }
+    
+    return {
+        x: Math.random() * state.w,
+        y: -20,
+        size: Math.random() * 4 + 3,
+        color,
+        type,
+        fallSpeed: Math.random() * 0.3 + 0.2,
+        drift: (Math.random() - 0.5) * 0.5,
+        rotation: Math.random() * TWO_PI,
+        rotationSpeed: (Math.random() - 0.5) * 0.02,
+        wobble: Math.random() * TWO_PI,
+        wobbleSpeed: Math.random() * 0.02 + 0.01,
+        alpha: Math.random() * 0.4 + 0.3
+    };
+}
+
 // Draw rings on canvas overlay
 function drawRings(ctx, timeData) {
     const cx = state.cx;
@@ -550,6 +618,157 @@ function drawHourStones(ctx, timeData) {
     }
 }
 
+// Update sand spirits behavior
+function updateSandSpirits(timeData, timestamp) {
+    const activeRing = minuteRings[Math.min(timeData.minutes, 59)];
+    
+    sandSpirits.forEach(spirit => {
+        // Determine behavior based on context
+        if (state.resetAnimating) {
+            // During reset: spiral into rock
+            spirit.behavior = 'converge';
+            spirit.targetX = state.cx;
+            spirit.targetY = state.cy;
+            spirit.speed = 2;
+        } else if (state.shimmerIntensity > 0.5) {
+            // During shimmer: gather at active ring
+            spirit.behavior = 'gather';
+            const angle = (spirit.phase + timestamp * 0.001) % TWO_PI;
+            spirit.targetX = state.cx + Math.cos(angle) * activeRing.radius;
+            spirit.targetY = state.cy + Math.sin(angle) * activeRing.radius;
+            spirit.speed = 1.5;
+        } else {
+            // Normal: drift and tend
+            spirit.behavior = 'drift';
+            
+            // Occasionally visit rings or stones
+            if (Math.random() < 0.002) {
+                if (Math.random() < 0.7 && timeData.minutes > 0) {
+                    // Visit a completed ring
+                    const ringIndex = Math.floor(Math.random() * timeData.minutes);
+                    const ring = minuteRings[ringIndex];
+                    const angle = Math.random() * TWO_PI;
+                    spirit.targetX = state.cx + Math.cos(angle) * ring.radius;
+                    spirit.targetY = state.cy + Math.sin(angle) * ring.radius;
+                } else {
+                    // Visit an hour stone
+                    const stone = hourStones[Math.floor(Math.random() * 12)];
+                    if (stone.alpha > 0.1) {
+                        spirit.targetX = stone.x;
+                        spirit.targetY = stone.y;
+                    }
+                }
+            }
+            
+            spirit.speed = 0.3;
+        }
+        
+        // Move toward target
+        const dx = spirit.targetX - spirit.x;
+        const dy = spirit.targetY - spirit.y;
+        spirit.x += dx * spirit.speed * 0.02;
+        spirit.y += dy * spirit.speed * 0.02;
+        
+        // Gentle bobbing
+        spirit.phase += 0.01;
+    });
+}
+
+// Update falling leaves
+function updateFallingLeaves(timeData) {
+    fallingLeaves.forEach(leaf => {
+        leaf.y += leaf.fallSpeed;
+        leaf.x += leaf.drift + Math.sin(leaf.wobble) * 0.3;
+        leaf.wobble += leaf.wobbleSpeed;
+        leaf.rotation += leaf.rotationSpeed;
+        
+        // Reset at bottom
+        if (leaf.y > state.h + 20) {
+            leaf.y = -20;
+            leaf.x = Math.random() * state.w;
+            
+            // Refresh seasonal color
+            const hour = new Date().getHours();
+            if (hour >= 5 && hour < 10) {
+                leaf.color = Math.random() > 0.5 ? '#ffc0cb' : '#ffffff';
+                leaf.type = 'petal';
+            } else if (hour >= 10 && hour < 16) {
+                leaf.color = ['#d4a574', '#c49a6c', '#b8860b'][Math.floor(Math.random() * 3)];
+                leaf.type = 'leaf';
+            } else {
+                leaf.color = Math.random() > 0.8 ? '#e8dcc8' : '#8b7d6b';
+                leaf.type = 'leaf';
+            }
+        }
+        
+        // On reset: burst of leaves
+        if (state.resetAnimating && Math.random() < 0.05) {
+            leaf.fallSpeed *= 1.5;
+        } else if (!state.resetAnimating) {
+            leaf.fallSpeed = Math.max(0.2, leaf.fallSpeed * 0.99);
+        }
+    });
+}
+
+// Draw sand spirits
+function drawSandSpirits(ctx) {
+    sandSpirits.forEach(spirit => {
+        const pulse = Math.sin(spirit.phase) * 0.3 + 0.7;
+        const glowSize = spirit.size * 3;
+        
+        // Glow
+        ctx.globalAlpha = spirit.alpha * pulse * 0.4;
+        const glow = ctx.createRadialGradient(spirit.x, spirit.y, 0, spirit.x, spirit.y, glowSize);
+        glow.addColorStop(0, '#e8dcc8');
+        glow.addColorStop(1, 'transparent');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(spirit.x, spirit.y, glowSize, 0, TWO_PI);
+        ctx.fill();
+        
+        // Core
+        ctx.globalAlpha = spirit.alpha * pulse;
+        ctx.fillStyle = '#f5ede0';
+        ctx.beginPath();
+        ctx.arc(spirit.x, spirit.y, spirit.size, 0, TWO_PI);
+        ctx.fill();
+    });
+}
+
+// Draw falling leaves
+function drawFallingLeaves(ctx) {
+    fallingLeaves.forEach(leaf => {
+        ctx.save();
+        ctx.translate(leaf.x, leaf.y);
+        ctx.rotate(leaf.rotation);
+        ctx.globalAlpha = leaf.alpha;
+        
+        if (leaf.type === 'petal') {
+            // Cherry blossom petal
+            ctx.fillStyle = leaf.color;
+            ctx.beginPath();
+            ctx.moveTo(0, -leaf.size);
+            ctx.quadraticCurveTo(leaf.size, -leaf.size * 0.5, leaf.size * 0.7, 0);
+            ctx.quadraticCurveTo(leaf.size, leaf.size * 0.5, 0, leaf.size);
+            ctx.quadraticCurveTo(-leaf.size, leaf.size * 0.5, -leaf.size * 0.7, 0);
+            ctx.quadraticCurveTo(-leaf.size, -leaf.size * 0.5, 0, -leaf.size);
+            ctx.fill();
+        } else {
+            // Leaf shape
+            ctx.fillStyle = leaf.color;
+            ctx.beginPath();
+            ctx.moveTo(0, -leaf.size);
+            ctx.quadraticCurveTo(leaf.size * 0.8, -leaf.size * 0.3, leaf.size * 0.5, leaf.size * 0.5);
+            ctx.lineTo(0, leaf.size * 0.3);
+            ctx.lineTo(-leaf.size * 0.5, leaf.size * 0.5);
+            ctx.quadraticCurveTo(-leaf.size * 0.8, -leaf.size * 0.3, 0, -leaf.size);
+            ctx.fill();
+        }
+        
+        ctx.restore();
+    });
+}
+
 // ── Animation Loop ─────────────────────────────────────────────────
 function loop(timestamp) {
     const timeData = getTimeData();
@@ -630,12 +849,18 @@ function loop(timestamp) {
     const breath = 1 + Math.sin(timestamp * 0.001) * 0.02;
     rock.scale.set(1.0 * breath, 0.75 * breath, 0.95 * breath);
     
+    // Update particles
+    updateSandSpirits(timeData, timestamp);
+    updateFallingLeaves(timeData);
+    
     // Render 3D scene
     renderer.render(scene, camera);
     
     // Draw 2D rings overlay
     ringsCtx.clearRect(0, 0, state.w, state.h);
+    drawFallingLeaves(ringsCtx); // Behind everything
     drawRings(ringsCtx, timeData);
+    drawSandSpirits(ringsCtx); // In front of rings
     
     requestAnimationFrame(loop);
 }
