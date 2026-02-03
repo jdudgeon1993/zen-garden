@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Zen Time Garden</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #2a2a2a; }
+        body { display: flex; align-items: center; justify-content: center; }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100dvh;
+            touch-action: none;
+        }
+        .time-whisper {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-family: 'Georgia', serif;
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.2);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            pointer-events: none;
+        }
+        @media (max-width: 768px) {
+            .time-whisper {
+                font-size: 9px;
+                top: 15px;
+                right: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="zenCanvas" role="img" aria-label="Zen Time Garden: meditative clock"></canvas>
+    <canvas id="ringsCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+    <div class="time-whisper">Temporal Garden</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js';
+
+// ── Canvas Setup ───────────────────────────────────────────────────
+const canvas = document.getElementById('zenCanvas');
+const ringsCanvas = document.getElementById('ringsCanvas');
+const ringsCtx = ringsCanvas.getContext('2d');
+const TWO_PI = Math.PI * 2;
+
+const state = {
+    w: 0, h: 0, cx: 0, cy: 0, dpr: 1,
+    baseSize: 0,
+    rockSize: 0,
+    innerRadius: 0,
+    maxClockRadius: 0,
+    hourStoneRadius: 0,
+    isMobile: false,
+    currentHour: -1,
+    shimmerIntensity: 0,
+    lastShimmerMin: -1,
+    lastSec: -1,
+    resetAnimating: false,
+    resetProgress: 0,
+};
+
+// Three.js setup
+let scene, camera, renderer;
+let sand, rock;
+let minuteRings = []; // 60 rings, one per minute
+let hourStones = []; // 12 hour markers
+let ambientLight, sunLight, shimmerLight;
+
+// ── Resize ─────────────────────────────────────────────────────────
+function resize() {
+    state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    state.w = window.innerWidth;
+    state.h = window.innerHeight;
+    state.cx = state.w / 2;
+    state.cy = state.h / 2;
+    state.isMobile = state.w < 768;
+    state.baseSize = Math.min(state.w, state.h);
+    
+    // Resize both canvases
+    ringsCanvas.width = state.w * state.dpr;
+    ringsCanvas.height = state.h * state.dpr;
+    ringsCanvas.style.width = state.w + 'px';
+    ringsCanvas.style.height = state.h + 'px';
+    ringsCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+    
+    // Scale from baseSize - better spacing and fix rock overlap
+    state.rockSize = state.baseSize * 0.08;
+    state.innerRadius = state.baseSize * 0.12; // Start OUTSIDE the rock
+    state.maxClockRadius = state.baseSize * (state.isMobile ? 0.42 : 0.40);
+    state.hourStoneRadius = state.baseSize * (state.isMobile ? 0.47 : 0.45);
+    
+    // Build 60 rings preserving glow state
+    const oldGlows = minuteRings.map(r => r.glow || 0);
+    minuteRings = [];
+    for (let i = 1; i <= 60; i++) {
+        const t = i / 60;
+        const r = state.innerRadius + t * (state.maxClockRadius - state.innerRadius);
+        minuteRings.push({ 
+            minute: i,
+            radius: r,
+            radiusWorld: r * 0.01,
+            glow: oldGlows[i - 1] || 0,
+            active: false
+        });
+    }
+    
+    // Build 12 hour stones preserving emergence state
+    const oldStones = hourStones.map(s => ({ alpha: s.alpha || 0, isCurrent: s.isCurrent || false }));
+    hourStones = [];
+    for (let h = 1; h <= 12; h++) {
+        const angle = (h / 12) * TWO_PI - Math.PI / 2; // 12 at top
+        const x = state.cx + Math.cos(angle) * state.hourStoneRadius;
+        const y = state.cy + Math.sin(angle) * state.hourStoneRadius;
+        hourStones.push({
+            hour: h,
+            x, y, angle,
+            alpha: oldStones[h - 1]?.alpha || 0,
+            isCurrent: oldStones[h - 1]?.isCurrent || false,
+            targetAlpha: 0,
+            rippleOffset: 0
+        });
+    }
+    
+    if (renderer) {
+        renderer.setSize(state.w, state.h);
+        renderer.setPixelRatio(state.dpr);
+    }
+    
+    if (camera) {
+        const viewSize = state.baseSize * 0.012;
+        const aspect = state.w / state.h;
+        camera.left = viewSize * aspect / -2;
+        camera.right = viewSize * aspect / 2;
+        camera.top = viewSize / 2;
+        camera.bottom = viewSize / -2;
+        camera.updateProjectionMatrix();
+    }
+}
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resize, 100);
+});
+
+// ── Three.js Setup ─────────────────────────────────────────────────
+function initThree() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x2a2a2a);
+    scene.fog = new THREE.Fog(0x2a2a2a, 15, 40);
+    
+    // Orthographic camera
+    const viewSize = state.baseSize * 0.012;
+    const aspect = state.w / state.h;
+    camera = new THREE.OrthographicCamera(
+        viewSize * aspect / -2,
+        viewSize * aspect / 2,
+        viewSize / 2,
+        viewSize / -2,
+        0.1,
+        1000
+    );
+    camera.position.set(0, 12, 0);
+    camera.lookAt(0, 0, 0);
+    
+    // Renderer
+    renderer = new THREE.WebGLRenderer({ 
+        canvas: canvas,
+        antialias: true,
+        powerPreference: "high-performance"
+    });
+    renderer.setSize(state.w, state.h);
+    renderer.setPixelRatio(state.dpr);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
+    
+    // Lighting
+    ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+    
+    sunLight = new THREE.DirectionalLight(0xfff8e7, 1.2);
+    sunLight.position.set(5, 10, 3);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.near = 0.5;
+    sunLight.shadow.camera.far = 50;
+    sunLight.shadow.camera.left = sunLight.shadow.camera.bottom = -12;
+    sunLight.shadow.camera.right = sunLight.shadow.camera.top = 12;
+    scene.add(sunLight);
+    
+    const fillLight = new THREE.DirectionalLight(0xb8d4ff, 0.3);
+    fillLight.position.set(-5, 8, -3);
+    scene.add(fillLight);
+    
+    // Shimmer light
+    shimmerLight = new THREE.PointLight(0xfffacd, 0, 15);
+    shimmerLight.position.set(0, 5, 0);
+    scene.add(shimmerLight);
+    
+    // Create sand plane
+    createSand();
+    
+    // Create rock
+    createRock();
+}
+
+function createSand() {
+    const sandGeometry = new THREE.PlaneGeometry(15, 15, 128, 128);
+    
+    // Sand texture
+    const sandCanvas = document.createElement('canvas');
+    sandCanvas.width = 512;
+    sandCanvas.height = 512;
+    const ctx = sandCanvas.getContext('2d');
+    
+    const gradient = ctx.createRadialGradient(256, 256, 0, 256, 256, 400);
+    gradient.addColorStop(0, '#f2eade');
+    gradient.addColorStop(0.5, '#e8dcc8');
+    gradient.addColorStop(1, '#d4c4a8');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 512, 512);
+    
+    // Add grain
+    const imageData = ctx.getImageData(0, 0, 512, 512);
+    for (let i = 0; i < imageData.data.length; i += 4) {
+        const noise = (Math.random() - 0.5) * 20;
+        imageData.data[i] += noise;
+        imageData.data[i + 1] += noise;
+        imageData.data[i + 2] += noise;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    
+    const sandTexture = new THREE.CanvasTexture(sandCanvas);
+    sandTexture.wrapS = sandTexture.wrapT = THREE.RepeatWrapping;
+    sandTexture.repeat.set(3, 3);
+    
+    const sandMaterial = new THREE.MeshStandardMaterial({
+        map: sandTexture,
+        roughness: 0.95,
+        metalness: 0.0
+    });
+    
+    sand = new THREE.Mesh(sandGeometry, sandMaterial);
+    sand.rotation.x = -Math.PI / 2;
+    sand.receiveShadow = true;
+    scene.add(sand);
+}
+
+function createRock() {
+    // Scale rock size from state
+    const rockScale = state.rockSize * 0.01; // Convert to world units
+    
+    const rockGeometry = new THREE.SphereGeometry(rockScale, 32, 32);
+    const positions = rockGeometry.attributes.position;
+    
+    // Deform for irregularity
+    for (let i = 0; i < positions.count; i++) {
+        const x = positions.getX(i);
+        const y = positions.getY(i);
+        const z = positions.getZ(i);
+        
+        const noise = 
+            Math.sin(x * 35) * 0.08 + 
+            Math.cos(y * 42) * 0.06 + 
+            Math.sin(z * 38) * 0.07 +
+            (Math.random() - 0.5) * 0.05;
+        
+        const scale = 1 + noise;
+        positions.setXYZ(i, x * scale, y * scale, z * scale);
+    }
+    
+    positions.needsUpdate = true;
+    rockGeometry.computeVertexNormals();
+    
+    // Rock texture
+    const rockCanvas = document.createElement('canvas');
+    rockCanvas.width = 512;
+    rockCanvas.height = 512;
+    const ctx = rockCanvas.getContext('2d');
+    
+    const rockGradient = ctx.createRadialGradient(256, 256, 0, 256, 256, 400);
+    rockGradient.addColorStop(0, '#8a8875');
+    rockGradient.addColorStop(0.5, '#686855');
+    rockGradient.addColorStop(1, '#48483a');
+    ctx.fillStyle = rockGradient;
+    ctx.fillRect(0, 0, 512, 512);
+    
+    // Speckles
+    for (let i = 0; i < 2000; i++) {
+        const x = Math.random() * 512;
+        const y = Math.random() * 512;
+        const size = Math.random() * 3 + 1;
+        const darkness = Math.random() * 0.4;
+        ctx.fillStyle = `rgba(0, 0, 0, ${darkness})`;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, TWO_PI);
+        ctx.fill();
+    }
+    
+    // Moss patches
+    for (let i = 0; i < 8; i++) {
+        const x = Math.random() * 512;
+        const y = Math.random() * 512;
+        const size = Math.random() * 40 + 20;
+        const mossGrad = ctx.createRadialGradient(x, y, 0, x, y, size);
+        mossGrad.addColorStop(0, 'rgba(70, 85, 60, 0.6)');
+        mossGrad.addColorStop(0.5, 'rgba(60, 75, 50, 0.3)');
+        mossGrad.addColorStop(1, 'rgba(50, 65, 40, 0)');
+        ctx.fillStyle = mossGrad;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, TWO_PI);
+        ctx.fill();
+    }
+    
+    const rockTexture = new THREE.CanvasTexture(rockCanvas);
+    
+    const rockMaterial = new THREE.MeshStandardMaterial({
+        map: rockTexture,
+        roughness: 0.9,
+        metalness: 0.1
+    });
+    
+    rock = new THREE.Mesh(rockGeometry, rockMaterial);
+    rock.position.set(0, rockScale * 0.5, 0);
+    rock.castShadow = true;
+    rock.receiveShadow = true;
+    rock.scale.set(1.0, 0.75, 0.95);
+    scene.add(rock);
+}
+
+// ── Time & Rings ───────────────────────────────────────────────────
+function getTimeData() {
+    const now = new Date();
+    const hours = now.getHours() % 12 || 12;
+    const minutes = now.getMinutes();
+    const seconds = now.getSeconds();
+    const ms = now.getMilliseconds();
+    
+    const secFrac = seconds + ms / 1000;
+    const minuteProgress = secFrac / 60;
+    
+    return { hours, minutes, seconds, secFrac, minuteProgress };
+}
+
+// Draw rings on canvas overlay
+function drawRings(ctx, timeData) {
+    const cx = state.cx;
+    const cy = state.cy;
+    const passedMinutes = timeData.minutes;
+    
+    // Draw all 60 minute rings with visibility hierarchy
+    for (let i = 0; i < 60; i++) {
+        const ring = minuteRings[i];
+        const minuteNumber = i + 1; // 1-60
+        const isPassed = i < passedMinutes;
+        const isActive = i === passedMinutes;
+        const isFiveMin = minuteNumber % 5 === 0;
+        const isQuarter = minuteNumber % 15 === 0;
+        
+        // Ring glow state
+        if (isPassed) {
+            ring.glow = Math.min(ring.glow + 0.05, 1);
+        } else {
+            ring.glow *= 0.95;
+        }
+        
+        // VISIBILITY HIERARCHY - darker colors, higher contrast
+        let ringAlpha, ringColor, ringWidth;
+        
+        if (isActive) {
+            // Active ring - will show arc separately
+            continue; // Skip base ring, draw arc below
+        } else if (isQuarter && isPassed) {
+            // Quarter rings (15, 30, 45) - most prominent, deep grooves
+            ringAlpha = 0.8 + ring.glow * 0.15;
+            ringColor = '#6b5d4b'; // Dark brown - deep groove
+            ringWidth = state.isMobile ? 3.5 : 4;
+        } else if (isFiveMin && isPassed) {
+            // Five-minute rings (5, 10, 20, 25, etc) - clearly visible grooves
+            ringAlpha = 0.65 + ring.glow * 0.15;
+            ringColor = '#8b7d6b'; // Medium brown
+            ringWidth = state.isMobile ? 2.5 : 3;
+        } else if (isPassed) {
+            // Regular minute rings - subtle ambient texture
+            ringAlpha = 0.04 + ring.glow * 0.02;
+            ringColor = '#a89880';
+            ringWidth = 1;
+        } else {
+            // Future rings - barely visible ghost
+            ringAlpha = 0.02;
+            ringColor = '#999';
+            ringWidth = 1;
+        }
+        
+        ctx.globalAlpha = ringAlpha;
+        ctx.strokeStyle = ringColor;
+        ctx.lineWidth = ringWidth;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ring.radius, 0, TWO_PI);
+        ctx.stroke();
+    }
+    
+    // Draw active ring with second progress arc
+    if (passedMinutes < 60) {
+        const activeRing = minuteRings[passedMinutes];
+        const secProgress = timeData.secFrac / 60;
+        const startAngle = -Math.PI / 2;
+        const endAngle = startAngle + secProgress * TWO_PI;
+        
+        // The arc itself - bright and clear
+        ctx.globalAlpha = 0.85;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = state.isMobile ? 3.5 : 4;
+        ctx.beginPath();
+        ctx.arc(cx, cy, activeRing.radius, startAngle, endAngle);
+        ctx.stroke();
+        
+        // Leading white dot
+        const dotX = cx + Math.cos(endAngle) * activeRing.radius;
+        const dotY = cy + Math.sin(endAngle) * activeRing.radius;
+        const dotSize = state.isMobile ? 6 : 7;
+        
+        // Dot glow
+        ctx.globalAlpha = 0.5;
+        const dotGlow = ctx.createRadialGradient(dotX, dotY, 0, dotX, dotY, dotSize * 3.5);
+        dotGlow.addColorStop(0, '#fff');
+        dotGlow.addColorStop(1, 'transparent');
+        ctx.fillStyle = dotGlow;
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, dotSize * 3.5, 0, TWO_PI);
+        ctx.fill();
+        
+        // Dot core
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#fff';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#fff';
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, dotSize, 0, TWO_PI);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+    }
+    
+    // Draw hour stones
+    drawHourStones(ctx, timeData);
+    
+    ctx.globalAlpha = 1;
+}
+
+// Draw 12 hour stones with emergence and reset animation
+function drawHourStones(ctx, timeData) {
+    const currentHour12 = timeData.hours; // 1-12
+    const minutes = timeData.minutes;
+    const seconds = timeData.seconds;
+    const timestamp = performance.now();
+    
+    for (let i = 0; i < hourStones.length; i++) {
+        const stone = hourStones[i];
+        const stoneHour = stone.hour;
+        
+        // Stone 12 is ALWAYS visible (anchor stone)
+        const isAnchor = stoneHour === 12;
+        const isPast = stoneHour < currentHour12 || (currentHour12 === 12 && stoneHour === 12);
+        const isCurrent = stoneHour === currentHour12;
+        
+        // Emergence: next stone appears during last minute of current hour
+        const nextHour = (currentHour12 % 12) + 1;
+        const isEmerging = stoneHour === nextHour && minutes === 59 && seconds < 40;
+        
+        // Update target alpha
+        if (state.resetAnimating) {
+            // Reset animation - all stones ripple out except anchor
+            if (isAnchor) {
+                stone.targetAlpha = 1; // Stone 12 stays
+            } else {
+                stone.targetAlpha = 0; // Others fade
+            }
+        } else if (isAnchor) {
+            // Stone 12 always visible
+            stone.targetAlpha = 1;
+        } else if (isPast || isCurrent) {
+            // Past hours and current hour visible
+            stone.targetAlpha = 1;
+        } else if (isEmerging) {
+            // Emerging stone fades in during 11:59:00 - 11:59:39
+            const emergenceProgress = seconds / 40; // 0-1 over 40 seconds
+            stone.targetAlpha = emergenceProgress;
+        } else {
+            // Future stones invisible
+            stone.targetAlpha = 0;
+        }
+        
+        // Smooth alpha transition
+        stone.alpha += (stone.targetAlpha - stone.alpha) * 0.1;
+        
+        if (stone.alpha < 0.01) continue;
+        
+        // Size based on state
+        const baseSize = state.isMobile ? 4 : 5;
+        const currentSize = state.isMobile ? 7 : 8;
+        const stoneSize = isCurrent ? currentSize : baseSize;
+        
+        // Current stone shimmers
+        let shimmer = 0;
+        if (isCurrent) {
+            shimmer = Math.sin(timestamp * 0.003) * 0.3 + 0.7;
+        }
+        
+        // Reset ripple effect
+        if (state.resetAnimating) {
+            stone.rippleOffset = state.resetProgress * state.baseSize * 0.1;
+        }
+        
+        const drawX = stone.x;
+        const drawY = stone.y + stone.rippleOffset;
+        
+        // Stone glow
+        if (isCurrent) {
+            ctx.globalAlpha = stone.alpha * shimmer * 0.4;
+            const stoneGlow = ctx.createRadialGradient(drawX, drawY, 0, drawX, drawY, stoneSize * 4);
+            stoneGlow.addColorStop(0, '#e8dcc8');
+            stoneGlow.addColorStop(1, 'transparent');
+            ctx.fillStyle = stoneGlow;
+            ctx.beginPath();
+            ctx.arc(drawX, drawY, stoneSize * 4, 0, TWO_PI);
+            ctx.fill();
+        }
+        
+        // Stone core
+        ctx.globalAlpha = stone.alpha * (isCurrent ? shimmer : 0.7);
+        ctx.fillStyle = isCurrent ? '#f5ede0' : '#d4c4a8';
+        ctx.beginPath();
+        ctx.arc(drawX, drawY, stoneSize, 0, TWO_PI);
+        ctx.fill();
+        
+        // Subtle highlight
+        ctx.globalAlpha = stone.alpha * 0.5;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(drawX - stoneSize * 0.3, drawY - stoneSize * 0.3, stoneSize * 0.4, 0, TWO_PI);
+        ctx.fill();
+    }
+}
+
+// ── Animation Loop ─────────────────────────────────────────────────
+function loop(timestamp) {
+    const timeData = getTimeData();
+    
+    // Initialize on first run
+    if (state.currentHour === -1) {
+        state.currentHour = timeData.hours;
+    }
+    
+    // Check for reset trigger at 11:59:40 (20 seconds before midnight/noon)
+    const isResetTime = timeData.hours === 11 && timeData.minutes === 59 && timeData.seconds >= 40;
+    
+    if (isResetTime && !state.resetAnimating) {
+        // Trigger reset animation
+        state.resetAnimating = true;
+        state.resetProgress = 0;
+        state.shimmerIntensity = 2.5; // Flash from center rock
+    }
+    
+    // Hour change at 12:00 - complete the reset
+    if (timeData.hours === 12 && timeData.minutes === 0 && state.resetAnimating) {
+        // Reset complete
+        state.resetAnimating = false;
+        state.resetProgress = 0;
+        state.currentHour = 12;
+        // Reset all stones except stone 12 (anchor)
+        hourStones.forEach(s => {
+            if (s.hour !== 12) {
+                s.alpha = 0;
+                s.rippleOffset = 0;
+            }
+        });
+        minuteRings.forEach(r => r.glow = 0);
+    }
+    
+    // Normal hour change (not during reset)
+    if (timeData.hours !== state.currentHour && !state.resetAnimating) {
+        state.currentHour = timeData.hours;
+        minuteRings.forEach(r => r.glow = 0);
+        state.shimmerIntensity = 1.0;
+    }
+    
+    // Animate reset over 20 seconds
+    if (state.resetAnimating) {
+        state.resetProgress += 0.05 / 20; // Progress from 0 to 1 over 20 seconds
+        if (state.resetProgress >= 1) {
+            state.resetProgress = 1;
+        }
+    }
+    
+    // Shimmer triggers (5 min and 15 min)
+    if (timeData.seconds !== state.lastSec) {
+        state.lastSec = timeData.seconds;
+        
+        if (timeData.seconds === 0 && !state.resetAnimating) {
+            const min = timeData.minutes;
+            if (min % 5 === 0 && min !== state.lastShimmerMin) {
+                state.lastShimmerMin = min;
+                state.shimmerIntensity = min % 15 === 0 ? 3.0 : 1.5;
+            }
+        }
+    }
+    
+    // Update shimmer
+    if (state.shimmerIntensity > 0) {
+        state.shimmerIntensity *= 0.97;
+        if (state.shimmerIntensity < 0.01) state.shimmerIntensity = 0;
+        shimmerLight.intensity = state.shimmerIntensity * 6;
+        ambientLight.intensity = 0.4 + state.shimmerIntensity * 0.3;
+        sunLight.intensity = 1.2 + state.shimmerIntensity * 0.2;
+    } else {
+        shimmerLight.intensity = 0;
+        ambientLight.intensity = 0.4;
+        sunLight.intensity = 1.2;
+    }
+    
+    // Rock breathing
+    const breath = 1 + Math.sin(timestamp * 0.001) * 0.02;
+    rock.scale.set(1.0 * breath, 0.75 * breath, 0.95 * breath);
+    
+    // Render 3D scene
+    renderer.render(scene, camera);
+    
+    // Draw 2D rings overlay
+    ringsCtx.clearRect(0, 0, state.w, state.h);
+    drawRings(ringsCtx, timeData);
+    
+    requestAnimationFrame(loop);
+}
+
+// ── Initialize ─────────────────────────────────────────────────────
+resize();
+initThree();
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
