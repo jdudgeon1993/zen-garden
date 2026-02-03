@@ -82,7 +82,12 @@ function resize() {
     state.cx = state.w / 2;
     state.cy = state.h / 2;
     state.isMobile = state.w < 768;
-    state.baseSize = Math.min(state.w, state.h);
+    
+    // OPTION A: Smart baseSize that respects screen dimensions
+    // Use the constraining dimension with padding for safe area
+    const minDimension = Math.min(state.w, state.h);
+    const safePadding = state.isMobile ? 0.90 : 0.85; // 10% padding mobile, 15% desktop
+    state.baseSize = minDimension * safePadding;
     
     // Resize both canvases
     ringsCanvas.width = state.w * state.dpr;
@@ -91,11 +96,11 @@ function resize() {
     ringsCanvas.style.height = state.h + 'px';
     ringsCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
     
-    // Scale from baseSize - BOLD screen usage like Zen Sanctuary
-    state.rockSize = state.baseSize * (state.isMobile ? 0.05 : 0.08); // Keep rock small as anchor
-    state.innerRadius = state.baseSize * (state.isMobile ? 0.10 : 0.12); // Start rings outside rock
-    state.maxClockRadius = state.baseSize * (state.isMobile ? 0.85 : 0.75); // DRAMATIC increase - use full screen!
-    state.hourStoneRadius = state.baseSize * (state.isMobile ? 0.88 : 0.78); // Just outside 60th ring
+    // Scale everything from baseSize - EVERYTHING fits on screen
+    state.rockSize = state.baseSize * 0.06; // Rock proportional to available space
+    state.innerRadius = state.baseSize * 0.12; // Rings start outside rock
+    state.maxClockRadius = state.baseSize * 0.45; // Outermost ring at 45% of safe area
+    state.hourStoneRadius = state.baseSize * 0.48; // Hour stones just outside
     
     // Build 60 rings preserving glow state
     const oldGlows = minuteRings.map(r => r.glow || 0);
@@ -149,7 +154,8 @@ function resize() {
     }
     
     if (camera) {
-        const viewSize = state.baseSize * (state.isMobile ? 0.022 : 0.018); // Wider view for larger rings
+        // Camera view matches the safe baseSize area
+        const viewSize = state.baseSize * 0.013;
         const aspect = state.w / state.h;
         camera.left = viewSize * aspect / -2;
         camera.right = viewSize * aspect / 2;
@@ -172,7 +178,10 @@ function initThree() {
     scene.fog = new THREE.Fog(0x2a2a2a, 15, 40);
     
     // Orthographic camera
-    const viewSize = state.baseSize * (state.isMobile ? 0.022 : 0.018);
+    const minDimension = Math.min(state.w, state.h);
+    const safePadding = state.isMobile ? 0.90 : 0.85;
+    const baseSize = minDimension * safePadding;
+    const viewSize = baseSize * 0.013;
     const aspect = state.w / state.h;
     camera = new THREE.OrthographicCamera(
         viewSize * aspect / -2,
